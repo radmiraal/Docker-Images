@@ -1,95 +1,53 @@
-FROM debian:buster-slim AS base
+FROM nginx:alpine AS ngx_brotli_build
 
-ARG DEBIAN_FRONTEND=noninteractive
+ENV NGX_MODULE_COMMIT 9aec15e2aa6feea2113119ba06460af70ab3ea62
+ENV NGX_MODULE_PATH ngx_brotli
 
-ADD https://nginx.org/keys/nginx_signing.key /nginx_signing.key
+RUN wget "http://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" -O nginx.tar.gz && \
+  wget "https://github.com/google/ngx_brotli/archive/${NGX_MODULE_COMMIT}.tar.gz" -O ${NGX_MODULE_PATH}.tar.gz
 
+# For latest build deps, see https://github.com/nginxinc/docker-nginx/blob/master/mainline/alpine/Dockerfile
+RUN apk add --no-cache --virtual .build-deps \
+  gcc \
+  libc-dev \
+  make \
+  openssl-dev \
+  pcre-dev \
+  zlib-dev \
+  linux-headers \
+  libxslt-dev \
+  gd-dev \
+  geoip-dev \
+  perl-dev \
+  libedit-dev \
+  mercurial \
+  bash \
+  alpine-sdk \
+  findutils \
+  brotli-dev
+
+# Reuse same cli arguments as the nginx:alpine image used to build
+RUN CONFARGS=$(nginx -V 2>&1 | sed -n -e 's/^.*arguments: //p') \
+  tar -zxf nginx.tar.gz && \
+  tar -xzf "${NGX_MODULE_PATH}.tar.gz" && \
+  cd nginx-$NGINX_VERSION && \
+  ./configure --with-compat $CONFARGS --add-dynamic-module="$(pwd)/../${NGX_MODULE_PATH}-${NGX_MODULE_COMMIT}" && \
+  make && make install
+
+# save /usr/lib/*so deps
+RUN mkdir /so-deps && cp -L $(ldd /usr/local/nginx/modules/ngx_http_brotli_filter_module.so 2>/dev/null | grep '/usr/lib/' | awk '{ print $3 }' | tr '\n' ' ') /so-deps
+
+FROM nginx:alpine
+
+COPY --from=ngx_brotli_build /so-deps /usr/lib
+COPY --from=ngx_brotli_build /usr/local/nginx/modules/ngx_http_brotli_filter_module.so /usr/local/nginx/modules/ngx_http_brotli_filter_module.so
+COPY --from=ngx_brotli_build /usr/local/nginx/modules/ngx_http_brotli_static_module.so /usr/local/nginx/modules/ngx_http_brotli_static_module.so
+
+# prepend load_module commands to main nginx.conf
 RUN set -eux; \
-    apt-get update; \
-    apt-get install --no-install-recommends --no-install-suggests -y \
-        apt-transport-https \
-        ca-certificates \
-        gnupg; \
-    apt-key add /nginx_signing.key; \
-    rm -rf /nginx_signing.key; \
-    apt-get clean -y; \
-    rm -rf /var/lib/apt/lists/*;
+    echo "load_module /usr/local/nginx/modules/ngx_http_brotli_filter_module.so; $(cat /etc/nginx/nginx.conf)" > /etc/nginx/nginx.conf; \
+    echo "load_module /usr/local/nginx/modules/ngx_http_brotli_static_module.so; $(cat /etc/nginx/nginx.conf)" > /etc/nginx/nginx.conf;
 
-FROM base AS brotli-compile-image
+COPY www.conf /etc/nginx/conf.d/default.conf
 
-ARG DEBIAN_FRONTEND=noninteractive
-
-RUN set -eux; \
-    apt-get update; \
-    apt-get install -y \
-        git \
-        lsb-release; \
-    echo "deb https://nginx.org/packages/mainline/debian/ `lsb_release -sc` nginx \ndeb-src https://nginx.org/packages/mainline/debian/ `lsb_release -sc` nginx \n" >> /etc/apt/sources.list.d/nginx_mainline.list ; \
-    echo "deb http://deb.debian.org/debian experimental main" >> /etc/apt/sources.list.d/experimental.list; \
-    apt-get update; \
-    apt-get install -y \
-        nginx \
-        brotli \
-        libbrotli-dev \
-        dpkg-dev \
-        libpcre3 \
-        libpcre3-dev \
-        zlib1g \
-        zlib1g-dev \
-        openssl \
-        libssl-dev
-
-RUN set -eux; \
-    mkdir -p /opt; \
-    git clone https://github.com/google/ngx_brotli /opt/ngx_brotli; \
-    mkdir -p /usr/src/nginx; \
-    cd /usr/src/nginx/; \
-    apt-get source nginx;
-
-RUN set -eux; \
-    cd /usr/src/nginx/nginx-*; \
-    ./configure --with-compat --add-dynamic-module=/opt/ngx_brotli;
-
-RUN set -eux; \
-    cd /usr/src/nginx/nginx-*; \
-    make modules; \
-    chmod 644 objs/*.so; \
-    cp objs/*.so /etc/nginx/modules; \
-    rm -rf /usr/src/nginx;
-
-
-FROM base
-
-ARG DEBIAN_FRONTEND=noninteractive
-
-COPY --from=brotli-compile-image /etc/apt/sources.list.d/nginx_mainline.list /etc/apt/sources.list.d/
-
-RUN set -eux; \
-    apt-get update; \
-    apt-get install -y \
-        nginx \
-        brotli \
-        libbrotli1; \
-    apt-get remove --purge -y \
-        apt-transport-https \
-        ca-certificates; \
-    apt-get autoremove -y; \
-    apt-get clean -y; \
-    rm -rf /var/lib/apt/lists/*;
-
-COPY --from=brotli-compile-image /etc/nginx/modules /etc/nginx/modules/
-
-RUN set -eux; \
-    echo "load_module modules/ngx_http_brotli_filter_module.so;\n$(cat /etc/nginx/nginx.conf)" > /etc/nginx/nginx.conf; \
-    echo "load_module modules/ngx_http_brotli_static_module.so;\n$(cat /etc/nginx/nginx.conf)" > /etc/nginx/nginx.conf;
-
-# forward request and error logs to docker log collector
-RUN set -eux; \
-    ln -sf /dev/stdout /var/log/nginx/access.log; \
-    ln -sf /dev/stderr /var/log/nginx/error.log;
-
-EXPOSE 80
-
-STOPSIGNAL SIGTERM
-
-CMD ["nginx", "-g", "daemon off;"]
+EXPOSE 8080
