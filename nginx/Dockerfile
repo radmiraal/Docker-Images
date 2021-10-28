@@ -50,4 +50,12 @@ RUN set -eux; \
 
 COPY www.conf /etc/nginx/conf.d/default.conf
 
+RUN set -eux; \
+    mkdir -p /var/cache/nginx; \
+    chmod 777 /var/cache/nginx;
+
+RUN set -eux; \
+    mkdir -p /var/run; \
+    chmod 777 /var/run;
+
 EXPOSE 8080
